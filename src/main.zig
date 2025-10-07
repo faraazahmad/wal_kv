@@ -17,4 +17,5 @@ pub fn main() !void {
     };
 
     try wal.set_key("hello", "world", &journal);
+    try journal.run_checkpointer();
 }
