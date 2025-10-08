@@ -12,9 +12,9 @@ pub fn main() !void {
 
     var journal = wal.Journal{
         .allocator = allocator,
-        .config = wal.CheckpointerConfig{},
         .store = &kv_store,
     };
+    try journal.pre_allocate_wal();
 
     try wal.set_key("hello", "world", &journal);
     try journal.run_checkpointer();

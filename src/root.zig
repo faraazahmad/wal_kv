@@ -17,12 +17,16 @@ const WALInstruction = struct {
     value: []const u8,
 };
 
+pub const JournalError = error{
+    SetKeyFailed,
+};
+
 pub const Journal = struct {
     allocator: std.mem.Allocator,
     file_path: []const u8 = "/home/faraaz/.config/wal_kv/wal",
     current_wal_size: usize = 0,
     last_checkpoint_time: i64 = 0,
-    config: CheckpointerConfig,
+    config: CheckpointerConfig = CheckpointerConfig{},
     store: *std.StringHashMap(HashMapData),
 
     const Self = @This();
@@ -98,20 +102,67 @@ pub const Journal = struct {
         std.debug.print("Written {d} bytes to WAL\n", .{wirtten_size});
     }
 
-    // fn parse_line_to_instr(line: []const u8) !WALInstruction {}
-
-    fn process_instruction(_: WALInstruction) !void {
-        // std.debug.print("123{s} {s}:{s}\n", .{ instruction.op, instruction.key, instruction.value });
-        // 0. Parse it into an instruction struct
-        // 1. Flush it to disk
-        // 2. Apply it to in-mem kv_store
+    fn process_instruction(self: *Self, instruction: WALInstruction) !void {
+        if (std.mem.eql([]const u8, instruction.op, "set")) {
+            try self.store.put(instruction.key, instruction.value);
+        } else {
+            return JournalError.SetKeyFailed;
+        }
+        // TODO: Flush it to disk
     }
 
-    fn pre_allocate_wal() !void {}
+    pub fn pre_allocate_wal(self: *Self) !void {
+        const file = try std.fs.createFileAbsolute(self.file_path, .{});
+        defer file.close();
+
+        const prealloc_size: usize = 128 * 1024; // 128KiB
+        try file.setEndPos(prealloc_size);
+    }
 
     fn load_wal() !bool {}
 
-    fn replay_wal() !void {}
+    // Go through the WAL and apply each instruction, then clear the WAL
+    fn replay_wal(self: *Self) !void {
+        var file_buffer: [64 * 1024]u8 = undefined;
+        var op_list: [3][]const u8 = undefined;
+        var wal_file = try std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_write });
+        defer wal_file.close();
+
+        const stat = try wal_file.stat();
+        const wal_size_within_limit = stat.size < self.config.max_wal_size_in_bytes;
+        if (wal_size_within_limit) {
+            return;
+        }
+
+        // Read complete file into buffer
+        _ = try wal_file.readAll(&file_buffer);
+
+        var lines = std.mem.splitScalar(u8, &file_buffer, '\n');
+        while (lines.next()) |line| {
+            var instr_iter = std.mem.splitScalar(u8, line, ' ');
+
+            var index: usize = 0;
+            op_list = .{ "", "", "" };
+            while (instr_iter.next()) |op| {
+                if (index == 3) {
+                    break;
+                }
+
+                op_list[index] = op;
+                index += 1;
+            }
+
+            const instruction = WALInstruction{
+                .op = op_list[0],
+                .key = op_list[1],
+                .value = op_list[2],
+            };
+            try process_instruction(instruction);
+        }
+
+        // clear the log
+        try wal_file.setEndPos(0);
+    }
 };
 
 pub fn set_key(key: []const u8, value: []const u8, journal: *Journal) !void {
