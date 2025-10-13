@@ -6,9 +6,9 @@ pub const CheckpointerConfig = struct {
     max_wal_size_in_bytes: usize = 64 * 1024, // 64 kB
 };
 
-pub const HashMapData = enum {
-    key,
-    value,
+pub const HashMapData = union(enum) {
+    key: []const u8,
+    value: []const u8,
 };
 
 const WALInstruction = struct {
@@ -17,9 +17,7 @@ const WALInstruction = struct {
     value: []const u8,
 };
 
-pub const JournalError = error{
-    SetKeyFailed,
-};
+pub const JournalError = error{ SetKeyFailed, InvalidInstruction };
 
 pub const Journal = struct {
     allocator: std.mem.Allocator,
@@ -27,7 +25,7 @@ pub const Journal = struct {
     current_wal_size: usize = 0,
     last_checkpoint_time: i64 = 0,
     config: CheckpointerConfig = CheckpointerConfig{},
-    store: *std.StringHashMap(HashMapData),
+    store: *std.StringHashMap([]const u8),
 
     const Self = @This();
 
@@ -41,7 +39,6 @@ pub const Journal = struct {
 
     pub fn run_checkpointer(self: *Self) !void {
         var file_buffer: [64 * 1024]u8 = undefined;
-        var op_list: [3][]const u8 = undefined;
         var wal_file = try std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_write });
         defer wal_file.close();
 
@@ -61,6 +58,7 @@ pub const Journal = struct {
 
             var lines = std.mem.splitScalar(u8, &file_buffer, '\n');
 
+            var op_list: [3][]const u8 = undefined;
             while (lines.next()) |line| {
                 var instr_iter = std.mem.splitScalar(u8, line, ' ');
                 var index: usize = 0;
@@ -80,7 +78,7 @@ pub const Journal = struct {
                     .key = op_list[1],
                     .value = op_list[2],
                 };
-                try process_instruction(instruction);
+                try self.process_instruction(instruction);
             }
 
             // Because of early continue, this line assumes the log has been flushed to disk
@@ -97,18 +95,16 @@ pub const Journal = struct {
         defer wal_file.close();
 
         try wal_file.seekFromEnd(0);
-        const wirtten_size = try wal_file.write(instruction_str);
+        const written_size = try wal_file.write(instruction_str);
         try wal_file.sync();
-        std.debug.print("Written {d} bytes to WAL\n", .{wirtten_size});
+        std.debug.print("Written {d} bytes to WAL\n", .{written_size});
     }
 
     fn process_instruction(self: *Self, instruction: WALInstruction) !void {
-        if (std.mem.eql([]const u8, instruction.op, "set")) {
+        if (std.mem.eql(u8, instruction.op, "set")) {
             try self.store.put(instruction.key, instruction.value);
-        } else {
-            return JournalError.SetKeyFailed;
         }
-        // TODO: Flush it to disk
+        // TODO: Backup the data to disk
     }
 
     pub fn pre_allocate_wal(self: *Self) !void {
