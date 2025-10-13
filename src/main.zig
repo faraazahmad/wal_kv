@@ -21,5 +21,5 @@ pub fn main() !void {
     try journal.pre_allocate_wal();
     _ = try std.Thread.spawn(.{}, run_checkpointer, .{&journal});
 
-    try wal.set_key("hello", "world", &journal);
+    try journal.set_key("hello", "world");
 }
