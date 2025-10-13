@@ -159,10 +159,8 @@ pub const Journal = struct {
         // clear the log
         try wal_file.setEndPos(0);
     }
+
+    pub fn set_key(self: *Self, key: []const u8, value: []const u8) !void {
+        try self.append_op("set", key, value);
+    }
 };
-
-pub fn set_key(key: []const u8, value: []const u8, journal: *Journal) !void {
-    try journal.append_op("set", key, value);
-}
-
-pub fn load_kv_store() !void {}
