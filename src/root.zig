@@ -17,7 +17,7 @@ const WALInstruction = struct {
     value: []const u8,
 };
 
-pub const JournalError = error{ SetKeyFailed, InvalidInstruction };
+pub const JournalError = error{ SetKeyFailed, InvalidInstruction, WALCorrupt };
 
 pub const Journal = struct {
     allocator: std.mem.Allocator,
@@ -83,7 +83,8 @@ pub const Journal = struct {
 
             // Because of early continue, this line assumes the log has been flushed to disk
             // So clear the log
-            try wal_file.setEndPos(0);
+            // try wal_file.setEndPos(0);
+            // TODO: Add a milestone with timestamp to signify when the last checkpoint was done.
         }
     }
 
@@ -108,11 +109,21 @@ pub const Journal = struct {
     }
 
     pub fn pre_allocate_wal(self: *Self) !void {
-        const file = try std.fs.createFileAbsolute(self.file_path, .{});
-        defer file.close();
+        // Try opening file, if it exists and the size is within limit, return early
+        const wal_file = std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_only });
+        if (wal_file) |file| {
+            defer file.close();
+            return;
+        } else |err| {
+            if (err == error.FileNotFound) {
+                const file = try std.fs.createFileAbsolute(self.file_path, .{});
+                defer file.close();
 
-        const prealloc_size: usize = 128 * 1024; // 128KiB
-        try file.setEndPos(prealloc_size);
+                try file.setEndPos(@as(usize, 128 * 1024)); // 128KiB
+            } else {
+                return err;
+            }
+        }
     }
 
     fn load_wal() !bool {}
