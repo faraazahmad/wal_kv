@@ -2,7 +2,7 @@
 const std = @import("std");
 
 pub const CheckpointerConfig = struct {
-    checkoint_time_ms: u64 = 30 * 1000, // 30 seconds
+    checkoint_time_ms: u64 = 3 * 1000, // 3 seconds
     max_wal_size_in_bytes: usize = 64 * 1024, // 64 kB
 };
 
@@ -11,17 +11,35 @@ pub const HashMapData = union(enum) {
     value: []const u8,
 };
 
-const WALInstruction = struct {
-    op: []const u8,
-    key: []const u8,
-    value: []const u8,
+const INSTRUCTION_SET_SIZE: usize = 3;
+const InstructionSet = enum(u8) {
+    SET,
+    GET,
+    DELETE,
+};
+
+const WALInstruction = extern struct {
+    op: InstructionSet, // index of operation in instruction set
+
+    key_size: usize, // size of key (max 256)
+    key: [256]u8,
+
+    value_size: usize, // size of value (max 256)
+    value: [256]u8,
+};
+
+const WALFile = extern struct {
+    magic_number: u32 = 0xDEADBEEF, // Magic number to signify start of WAL
+    version: u8, // protocol version
+    instruction_set: [INSTRUCTION_SET_SIZE]InstructionSet, // Distinct instructions supported
+    instructions: [256]WALInstruction, // List of instructions in the WAL
 };
 
 pub const JournalError = error{ SetKeyFailed, InvalidInstruction, WALCorrupt };
 
 pub const Journal = struct {
     allocator: std.mem.Allocator,
-    file_path: []const u8 = "/home/faraaz/.config/wal_kv/wal",
+    file_path: []const u8 = "/home/faraaz/.config/wal_kv/bin_wal",
     current_wal_size: usize = 0,
     last_checkpoint_time: i64 = 0,
     config: CheckpointerConfig = CheckpointerConfig{},
@@ -37,15 +55,19 @@ pub const Journal = struct {
         };
     }
 
-    pub fn run_checkpointer(self: *Self) !void {
-        var file_buffer: [64 * 1024]u8 = undefined;
-        var wal_file = try std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_write });
-        defer wal_file.close();
+    pub fn run_bin_checkpointer(self: *Self) !void {
+        var wal: WALFile = undefined;
+        const file = try std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_write });
+        defer file.close();
 
         while (true) {
             const now = std.time.milliTimestamp();
             const time_since_last_checkpoint = @as(u64, @intCast(now - self.last_checkpoint_time));
-            const stat = try wal_file.stat();
+            const stat = try file.stat();
+
+            if (stat.size == 0) {
+                continue;
+            }
 
             const is_checkpoint_recent = time_since_last_checkpoint < self.config.checkoint_time_ms;
             const wal_size_within_limit = stat.size < self.config.max_wal_size_in_bytes;
@@ -53,32 +75,13 @@ pub const Journal = struct {
                 continue;
             }
 
-            // Read complete file into buffer
-            _ = try wal_file.readAll(&file_buffer);
+            // Read complete file into struct
+            const bytes_read = try file.readAll(std.mem.asBytes(&wal));
+            std.debug.assert(bytes_read > 0);
 
-            var lines = std.mem.splitScalar(u8, &file_buffer, '\n');
-
-            var op_list: [3][]const u8 = undefined;
-            while (lines.next()) |line| {
-                var instr_iter = std.mem.splitScalar(u8, line, ' ');
-                var index: usize = 0;
-                while (instr_iter.next()) |op| {
-                    if (index == 3) {
-                        break;
-                    }
-
-                    op_list[index] = op;
-
-                    index += 1;
-                }
-                std.debug.assert(op_list.len == 3);
-
-                const instruction = WALInstruction{
-                    .op = op_list[0],
-                    .key = op_list[1],
-                    .value = op_list[2],
-                };
-                try self.process_instruction(instruction);
+            for (wal.instructions) |instr| {
+                std.debug.print("{s}", .{std.mem.asBytes(&instr)});
+                try self.process_instruction(instr);
             }
 
             // Because of early continue, this line assumes the log has been flushed to disk
@@ -88,22 +91,23 @@ pub const Journal = struct {
         }
     }
 
-    fn append_op(self: *Self, op: []const u8, key: []const u8, value: []const u8) !void {
-        var instruction_buf: [256]u8 = undefined;
-        const instruction_str = try std.fmt.bufPrint(&instruction_buf, "{s} {s} {s}\n", .{ op, key, value });
+    fn append_bin_op(self: *Self, instruction: WALInstruction) !void {
+        // var instruction_buf: [256]u8 = undefined;
+        // const instruction_str = try std.fmt.bufPrint(&instruction_buf, "{s} {s} {s}\n", .{ op, key, value });
 
         var wal_file = try std.fs.cwd().openFile(self.file_path, .{ .mode = .write_only, .lock = .exclusive });
         defer wal_file.close();
 
         try wal_file.seekFromEnd(0);
-        const written_size = try wal_file.write(instruction_str);
+        const written_size = try wal_file.write(std.mem.asBytes(&instruction));
         try wal_file.sync();
         std.debug.print("Written {d} bytes to WAL\n", .{written_size});
     }
 
     fn process_instruction(self: *Self, instruction: WALInstruction) !void {
-        if (std.mem.eql(u8, instruction.op, "set")) {
-            try self.store.put(instruction.key, instruction.value);
+        switch (instruction.op) {
+            InstructionSet.SET => try self.store.put(&instruction.key, &instruction.value),
+            else => return JournalError.InvalidInstruction,
         }
         // TODO: Backup the data to disk
     }
@@ -128,50 +132,23 @@ pub const Journal = struct {
 
     fn load_wal() !bool {}
 
-    // Go through the WAL and apply each instruction, then clear the WAL
-    fn replay_wal(self: *Self) !void {
-        var file_buffer: [64 * 1024]u8 = undefined;
-        var op_list: [3][]const u8 = undefined;
-        var wal_file = try std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_write });
-        defer wal_file.close();
-
-        const stat = try wal_file.stat();
-        const wal_size_within_limit = stat.size < self.config.max_wal_size_in_bytes;
-        if (wal_size_within_limit) {
-            return;
+    pub fn bin_set_key(self: *Self, key: []const u8, value: []const u8) !void {
+        if (key.len > 256 or value.len > 256) {
+            return JournalError.InvalidInstruction;
         }
 
-        // Read complete file into buffer
-        _ = try wal_file.readAll(&file_buffer);
+        var fixed_size_key: [256]u8 = undefined;
+        var fixed_size_value: [256]u8 = undefined;
 
-        var lines = std.mem.splitScalar(u8, &file_buffer, '\n');
-        while (lines.next()) |line| {
-            var instr_iter = std.mem.splitScalar(u8, line, ' ');
+        @memcpy(fixed_size_key[0..key.len], key);
+        @memcpy(fixed_size_value[0..value.len], value);
 
-            var index: usize = 0;
-            op_list = .{ "", "", "" };
-            while (instr_iter.next()) |op| {
-                if (index == 3) {
-                    break;
-                }
-
-                op_list[index] = op;
-                index += 1;
-            }
-
-            const instruction = WALInstruction{
-                .op = op_list[0],
-                .key = op_list[1],
-                .value = op_list[2],
-            };
-            try process_instruction(instruction);
-        }
-
-        // clear the log
-        try wal_file.setEndPos(0);
-    }
-
-    pub fn set_key(self: *Self, key: []const u8, value: []const u8) !void {
-        try self.append_op("set", key, value);
+        try self.append_bin_op(WALInstruction{
+            .op = InstructionSet.SET,
+            .key_size = key.len,
+            .key = fixed_size_key,
+            .value_size = value.len,
+            .value = fixed_size_value,
+        });
     }
 };

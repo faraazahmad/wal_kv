@@ -2,7 +2,7 @@ const std = @import("std");
 const wal = @import("wal");
 
 fn run_checkpointer(journal: *wal.Journal) !void {
-    try journal.run_checkpointer();
+    try journal.run_bin_checkpointer();
 }
 
 pub fn main() !void {
@@ -21,5 +21,5 @@ pub fn main() !void {
     try journal.pre_allocate_wal();
     _ = try std.Thread.spawn(.{}, run_checkpointer, .{&journal});
 
-    try journal.set_key("hello", "world");
+    try journal.bin_set_key("hello", "world");
 }
