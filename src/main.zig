@@ -18,7 +18,14 @@ pub fn main() !void {
         .allocator = allocator,
         .store = &kv_store,
     };
-    try journal.pre_allocate_wal();
+    const wal_load_result = journal.load_wal();
+    if (wal_load_result) |result| {
+        if (result) {
+            std.debug.print("WAL loaded.", .{});
+        }
+    } else |_| {
+        std.debug.print("Unable to load WAL.", .{});
+    }
     _ = try std.Thread.spawn(.{}, run_checkpointer, .{&journal});
 
     try journal.bin_set_key("hello", "world");

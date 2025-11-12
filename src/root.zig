@@ -22,17 +22,17 @@ const WALInstruction = extern struct {
     op: InstructionSet, // index of operation in instruction set
 
     key_size: usize, // size of key (max 256)
-    key: [256]u8,
+    key: [256]u8, // varchar(255)
 
     value_size: usize, // size of value (max 256)
-    value: [256]u8,
+    value: [256]u8, // varchar(255)
 };
 
 const WALFile = extern struct {
     magic_number: u32 = 0xDEADBEEF, // Magic number to signify start of WAL
-    version: u8, // protocol version
+    version: u8 = 1, // protocol version
     instruction_set: [INSTRUCTION_SET_SIZE]InstructionSet, // Distinct instructions supported
-    instructions: [256]WALInstruction, // List of instructions in the WAL
+    instructions: [256]WALInstruction = undefined, // List of instructions in the WAL
 };
 
 pub const JournalError = error{ SetKeyFailed, InvalidInstruction, WALCorrupt };
@@ -112,25 +112,36 @@ pub const Journal = struct {
         // TODO: Backup the data to disk
     }
 
-    pub fn pre_allocate_wal(self: *Self) !void {
-        // Try opening file, if it exists and the size is within limit, return early
-        const wal_file = std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_only });
-        if (wal_file) |file| {
-            defer file.close();
-            return;
-        } else |err| {
-            if (err == error.FileNotFound) {
-                const file = try std.fs.createFileAbsolute(self.file_path, .{});
-                defer file.close();
+    fn init_wal(self: *Self) !void {
+        const file = try std.fs.createFileAbsolute(self.file_path, .{});
+        defer file.close();
 
-                try file.setEndPos(@as(usize, 128 * 1024)); // 128KiB
-            } else {
-                return err;
-            }
-        }
+        // Convert the extern struct into a fixed bytesize and preallocate the WAL
+        try file.setEndPos(@sizeOf(WALFile));
+
+        try file.setEndPos(0);
+        const wal_content = WALFile{
+            .instruction_set = [INSTRUCTION_SET_SIZE]InstructionSet{ InstructionSet.SET, InstructionSet.GET, InstructionSet.DELETE },
+        };
+        _ = try file.write(std.mem.asBytes(&wal_content));
     }
 
-    fn load_wal() !bool {}
+    // If WAL file doesn't exist, init it
+    // else check validity of WAL
+    pub fn load_wal(self: *Self) !bool {
+        const file = std.fs.openFileAbsolute(self.file_path, .{ .mode = .read_only });
+        if (file) |existing_wal| {
+            defer existing_wal.close();
+            return true;
+        } else |err| {
+            switch (err) {
+                std.fs.File.OpenError.FileNotFound => try self.init_wal(),
+                else => return err,
+            }
+        }
+
+        return false;
+    }
 
     pub fn bin_set_key(self: *Self, key: []const u8, value: []const u8) !void {
         if (key.len > 256 or value.len > 256) {
